@@ -1,0 +1,7 @@
+*.mp4
+.venv/
+__pycache__/
+output/
+*.pt
+swim_dataset/
+frames/

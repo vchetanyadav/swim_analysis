@@ -1,0 +1,19 @@
+# YOLO-pose dataset config for the swim fine-tune.
+# Put your corrected data under swim_dataset/ with this split:
+#   swim_dataset/images/train  swim_dataset/images/val
+#   swim_dataset/labels/train  swim_dataset/labels/val
+# IMPORTANT: split by participant (or by clip), never by random frame, or the
+# model sees almost-identical frames in both train and val and scores are fake.
+
+path: ./swim_dataset
+train: images/train
+val: images/val
+
+# 17 COCO keypoints, each stored as x, y, visibility
+kpt_shape: [17, 3]
+
+# left/right mirror map, so horizontal-flip augmentation keeps sides correct
+flip_idx: [0, 2, 1, 4, 3, 6, 5, 8, 7, 10, 9, 12, 11, 14, 13, 16, 15]
+
+names:
+  0: person
