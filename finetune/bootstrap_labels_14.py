@@ -1,73 +1,145 @@
 """
 bootstrap_labels_14.py
-Auto-label frames into the 14-keypoint SWIMMER layout (not COCO-17).
+Create initial SWIM-14 keypoint labels from a stock COCO-17 pose model.
 
-It runs the stock 17-keypoint model, then derives the 14 swimmer points:
-  head_center = mean of visible nose/ears     neck = shoulder midpoint
-  the other 12 = the COCO body joints directly.
-You then CORRECT these in a keypoint tool (CVAT/Roboflow set to 14 points) and
-train with swim14.yaml. Correcting a guess is far faster than labelling from zero.
+These are bootstrap guesses only. Every selected frame must be manually checked
+and corrected in CVAT/Roboflow before training.
 
-Usage:
-    python bootstrap_labels_14.py frames --out swim_dataset14 --model yolo11x-pose.pt
+Unlike the earlier bootstrap script, this version evaluates 0/90/180/270 degree
+orientations using the same anatomical scoring as pose_markerless.py. This avoids
+seeding the annotation set with the worst horizontal-swimmer predictions.
 """
-import argparse, os, glob, shutil, cv2, numpy as np
+
+import argparse
+import glob
+import os
+import shutil
+
+import cv2
+import numpy as np
 from ultralytics import YOLO
 
-# COCO-17 indices we read from
+import pose_markerless as pm
+
 NOSE, L_EAR, R_EAR = 0, 3, 4
-C = dict(l_sh=5, r_sh=6, l_el=7, r_el=8, l_wr=9, r_wr=10,
-         l_hip=11, r_hip=12, l_kn=13, r_kn=14, l_an=15, r_an=16)
+C = {
+    "l_sh": 5, "r_sh": 6, "l_el": 7, "r_el": 8,
+    "l_wr": 9, "r_wr": 10, "l_hip": 11, "r_hip": 12,
+    "l_kn": 13, "r_kn": 14, "l_an": 15, "r_an": 16,
+}
 
-def to14(kp):
-    """kp: 17x3 COCO -> list of 14 (x,y,v)."""
-    def g(i):
-        return kp[i, :2], (2 if kp[i, 2] > 0.5 else 0)
-    # head_center from visible head points
-    head_pts = [kp[i, :2] for i in (NOSE, L_EAR, R_EAR) if kp[i, 2] > 0.5]
-    head = (np.mean(head_pts, axis=0), 2) if head_pts else (np.zeros(2), 0)
-    # neck = shoulder midpoint
-    if kp[5, 2] > 0.5 and kp[6, 2] > 0.5:
-        neck = ((kp[5, :2] + kp[6, :2]) / 2, 2)
+
+def to14(kp, threshold=0.25):
+    def point(i):
+        if kp[i, 2] >= threshold:
+            return kp[i, :2].copy(), 2
+        return np.zeros(2, dtype=float), 0
+
+    hp = pm.head_point(kp, threshold)
+    head = (hp, 2) if hp is not None else (np.zeros(2, dtype=float), 0)
+
+    if kp[5, 2] >= threshold and kp[6, 2] >= threshold:
+        neck = ((kp[5, :2] + kp[6, :2]) / 2.0, 2)
     else:
-        neck = (np.zeros(2), 0)
-    order = [head, neck, g(C["l_sh"]), g(C["r_sh"]), g(C["l_el"]), g(C["r_el"]),
-             g(C["l_wr"]), g(C["r_wr"]), g(C["l_hip"]), g(C["r_hip"]),
-             g(C["l_kn"]), g(C["r_kn"]), g(C["l_an"]), g(C["r_an"])]
-    return order
+        neck = (np.zeros(2, dtype=float), 0)
 
-def bootstrap(frames_dir, out_dir, model_name="yolo11x-pose.pt", conf=0.25, imgsz=1280):
+    return [
+        head, neck,
+        point(C["l_sh"]), point(C["r_sh"]),
+        point(C["l_el"]), point(C["r_el"]),
+        point(C["l_wr"]), point(C["r_wr"]),
+        point(C["l_hip"]), point(C["r_hip"]),
+        point(C["l_kn"]), point(C["r_kn"]),
+        point(C["l_an"]), point(C["r_an"]),
+    ]
+
+
+def bootstrap(frames_dir, out_dir, model_name="yolo11x-pose.pt",
+              det_conf=0.15, kpt_conf=0.25, imgsz=1280, device=None):
     model = YOLO(model_name)
-    io, lo = os.path.join(out_dir, "images"), os.path.join(out_dir, "labels")
-    os.makedirs(io, exist_ok=True); os.makedirs(lo, exist_ok=True)
-    for fp in sorted(glob.glob(os.path.join(frames_dir, "*.jpg"))):
+    image_out = os.path.join(out_dir, "images")
+    label_out = os.path.join(out_dir, "labels")
+    os.makedirs(image_out, exist_ok=True)
+    os.makedirs(label_out, exist_ok=True)
+
+    files = []
+    for ext in ("*.jpg", "*.jpeg", "*.png"):
+        files.extend(glob.glob(os.path.join(frames_dir, ext)))
+    files = sorted(files)
+
+    wrote = 0
+    empty = 0
+    for n, fp in enumerate(files, 1):
         img = cv2.imread(fp)
         if img is None:
             continue
         h, w = img.shape[:2]
-        r = model.predict(img, imgsz=imgsz, conf=conf, verbose=False)[0]
+        kp, angle, _ = pm.best_orientation(
+            model, img, imgsz=imgsz, conf=det_conf,
+            device=device, prev_kp=None,
+        )
+
         base = os.path.splitext(os.path.basename(fp))[0]
-        shutil.copy(fp, os.path.join(io, base + ".jpg"))
+        ext = os.path.splitext(fp)[1].lower()
+        dst_img = os.path.join(image_out, base + ext)
+        shutil.copy2(fp, dst_img)
+
         line = None
-        if r.boxes is not None and len(r.boxes) > 0:
-            a = (r.boxes.xywh[:, 2] * r.boxes.xywh[:, 3]).cpu().numpy()
-            j = int(np.argmax(a))
-            bx, by, bw, bh = r.boxes.xywh[j].cpu().numpy()
-            pts = to14(r.keypoints.data[j].cpu().numpy())
-            parts = [f"0 {bx/w:.6f} {by/h:.6f} {bw/w:.6f} {bh/h:.6f}"]
-            for (xy, v) in pts:
-                parts.append(f"{xy[0]/w:.6f} {xy[1]/h:.6f} {v}")
-            line = " ".join(parts)
-        with open(os.path.join(lo, base + ".txt"), "w") as f:
+        if kp is not None:
+            pts = to14(kp, kpt_conf)
+            visible = [xy for xy, v in pts if v > 0]
+            if visible:
+                arr = np.asarray(visible)
+                x0, y0 = np.min(arr, axis=0)
+                x1, y1 = np.max(arr, axis=0)
+                # Expand the keypoint-derived box because wrists/ankles can be missed.
+                bw = max(1.0, x1 - x0)
+                bh = max(1.0, y1 - y0)
+                x0 = max(0.0, x0 - 0.12 * bw)
+                y0 = max(0.0, y0 - 0.12 * bh)
+                x1 = min(float(w - 1), x1 + 0.12 * bw)
+                y1 = min(float(h - 1), y1 + 0.12 * bh)
+                bx = (x0 + x1) / 2.0
+                by = (y0 + y1) / 2.0
+                bw = x1 - x0
+                bh = y1 - y0
+
+                parts = [f"0 {bx/w:.6f} {by/h:.6f} {bw/w:.6f} {bh/h:.6f}"]
+                for xy, v in pts:
+                    if v == 0:
+                        parts.append("0.000000 0.000000 0")
+                    else:
+                        parts.append(f"{xy[0]/w:.6f} {xy[1]/h:.6f} {v}")
+                line = " ".join(parts)
+
+        label_path = os.path.join(label_out, base + ".txt")
+        with open(label_path, "w") as f:
             if line:
                 f.write(line + "\n")
-    print(f"Wrote 14-keypoint labels to {out_dir}/. Correct them in a 14-point "
-          f"keypoint project, then train with swim14.yaml.")
+                wrote += 1
+            else:
+                empty += 1
+
+        if n % 50 == 0:
+            print(f"  {n}/{len(files)} frames")
+
+    print(
+        f"Done. {wrote} frames received bootstrap keypoints, {empty} were left empty.\n"
+        f"Now manually correct every label in a 14-point keypoint project before training."
+    )
+
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("frames_dir"); ap.add_argument("--out", default="swim_dataset14")
+    ap.add_argument("frames_dir")
+    ap.add_argument("--out", default="swim_dataset14")
     ap.add_argument("--model", default="yolo11x-pose.pt")
-    ap.add_argument("--conf", type=float, default=0.25); ap.add_argument("--imgsz", type=int, default=1280)
-    a = ap.parse_args()
-    bootstrap(a.frames_dir, a.out, a.model, a.conf, a.imgsz)
+    ap.add_argument("--det-conf", type=float, default=0.15)
+    ap.add_argument("--kpt-conf", type=float, default=0.25)
+    ap.add_argument("--imgsz", type=int, default=1280)
+    ap.add_argument("--device", default=None)
+    args = ap.parse_args()
+    bootstrap(
+        args.frames_dir, args.out, args.model,
+        args.det_conf, args.kpt_conf, args.imgsz, args.device,
+    )
