@@ -33,7 +33,10 @@ import pose_markerless as pm
 NOSE, L_EAR, R_EAR = 0, 3, 4
 L_SH, R_SH, L_EL, R_EL, L_WR, R_WR = 5, 6, 7, 8, 9, 10
 L_HIP, R_HIP, L_KN, R_KN, L_AN, R_AN = 11, 12, 13, 14, 15, 16
-LIMBS = {"l_arm": L_WR, "r_arm": R_WR, "l_leg": L_AN, "r_leg": R_AN}
+# each limb = (distal joint, proximal joint): measure the distal joint RELATIVE
+# to its proximal joint, so we capture limb movement, not whole-body drift.
+LIMB_PAIRS = {"l_arm": (L_WR, L_SH), "r_arm": (R_WR, R_SH),
+              "l_leg": (L_AN, L_HIP), "r_leg": (R_AN, R_HIP)}
 
 
 # ---------- geometry helpers ----------
@@ -145,7 +148,7 @@ def speed_series(xy, fps):
 
 # ---------- main ----------
 def analyze(video, out_dir, skip=3, imgsz=960, conf=0.25, model="yolo11n-pose.pt",
-            waterline=None, astart=0.0, adur=20.0):
+            waterline=None, astart=0.0, adur=20.0, strict=True, conf_gate=0.6):
     os.makedirs(out_dir, exist_ok=True)
     stem = os.path.splitext(os.path.basename(video))[0]
     net = YOLO(model)
@@ -165,12 +168,11 @@ def analyze(video, out_dir, skip=3, imgsz=960, conf=0.25, model="yolo11n-pose.pt
     band = max(3, int(0.012 * H))                     # hysteresis band for dips
 
     # ---- pass 1: joints + per-frame metrics over the whole clip ----
-    print("Analysing full clip...")
-    smoother = pm.Smoother((W**2 + H**2) ** 0.5)
-    rows, series = [], {"t": [], "body_angle": [], "neck_angle": [], "head_y": []}
-    limb_xy = {k: [] for k in LIMBS}
+    print("Analysing full clip (cropped + contrast pose, temporal tracking)...")
+    tracker = pm.SkeletonTracker()
+    rows, series = [], {"t": [], "body_angle": [], "neck_angle": [], "head_y": [], "torso": []}
+    limb_rel = {k: [] for k in LIMB_PAIRS}     # distal joint RELATIVE to its proximal joint
     idx = processed = 0
-    cur_angle = 0
     while True:
         ok, frame = cap.read()
         if not ok:
@@ -178,17 +180,19 @@ def analyze(video, out_dir, skip=3, imgsz=960, conf=0.25, model="yolo11n-pose.pt
         if idx % skip:
             idx += 1
             continue
-        if processed % pm.REORIENT_EVERY == 0:
-            kp, cur_angle = pm.best_orientation(net, frame, imgsz, conf)
-        else:
-            kp, _ = pm._kp_for_angle(net, frame, cur_angle, imgsz, conf)
+        kp = pm.pose_cropped(net, frame, imgsz, conf)      # crop + CLAHE + rotate + map back
         if kp is not None:
-            kp = pm.clean(kp, frame)
-            kp = smoother.apply(kp)
+            kp = pm.clean(kp, frame, drop_head=False)      # KEEP head for head/neck/dip
+            kp = tracker.update(kp)                         # L/R swap, bone, teleport fixes
+            if strict:
+                kp, ok = pm.quality_filter(kp, conf_min=conf_gate)
+                if not ok:
+                    kp = None                  # skip untrustworthy frames entirely
         t = idx / fps
 
         sh, hip = mid(kp, L_SH, R_SH), mid(kp, L_HIP, R_HIP)
         hd = head_point(kp) if kp is not None else None
+        torso = float(np.linalg.norm(sh - hip)) if (sh is not None and hip is not None) else np.nan
         body_angle = angle_from_horizontal(hip - sh) if (sh is not None and hip is not None) else np.nan
         neck = angle_between(hd, sh, hip) if (hd is not None and sh is not None and hip is not None) else np.nan
         head_y = float(hd[1]) if hd is not None else np.nan
@@ -197,8 +201,12 @@ def analyze(video, out_dir, skip=3, imgsz=960, conf=0.25, model="yolo11n-pose.pt
         series["body_angle"].append(body_angle)
         series["neck_angle"].append(neck)
         series["head_y"].append(head_y)
-        for k, j in LIMBS.items():
-            limb_xy[k].append(kp[j, :2] if vis(kp, j) else [np.nan, np.nan])
+        series["torso"].append(torso)
+        for k, (distal, prox) in LIMB_PAIRS.items():
+            if kp is not None and vis(kp, distal) and vis(kp, prox):
+                limb_rel[k].append(kp[distal, :2] - kp[prox, :2])   # limb motion, not body drift
+            else:
+                limb_rel[k].append([np.nan, np.nan])
 
         rows.append([idx, round(t, 3), round(body_angle, 1) if not np.isnan(body_angle) else "",
                      round(neck, 1) if not np.isnan(neck) else "",
@@ -216,19 +224,25 @@ def analyze(video, out_dir, skip=3, imgsz=960, conf=0.25, model="yolo11n-pose.pt
     dur_total = t_arr[-1] - t_arr[0] if len(t_arr) > 1 else 1
     dip_freq = len(dips) / (dur_total / 60.0)
     dip_durs = [d["duration_s"] for d in dips]
-    # limb frequency + intensity
+    med_torso = float(np.nanmedian(np.array(series["torso"], float)))
+    gap_limit = max(2, int(0.3 * fps_eff))          # only bridge gaps up to ~0.3s
+    # limb frequency + intensity (relative to proximal joint, normalized by torso)
     limb_stats = {}
-    for k in LIMBS:
-        xy = np.array(limb_xy[k], float)
-        f = cadence(xy, fps_eff)
-        sp = speed_series(pd.DataFrame(xy).interpolate(limit=8).to_numpy(), fps_eff)
-        sp = sp[~np.isnan(sp)]
-        seen = np.mean(~np.isnan(xy[:, 0])) * 100
+    for k in LIMB_PAIRS:
+        rel = np.array(limb_rel[k], float)
+        f = cadence(rel, fps_eff)
+        rel_i = pd.DataFrame(rel).interpolate(limit=gap_limit).to_numpy()
+        sp_px = speed_series(rel_i, fps_eff)
+        sp_px = sp_px[~np.isnan(sp_px)]
+        seen = np.mean(~np.isnan(rel[:, 0])) * 100
+        # normalized speed = body-lengths per second (distance-independent)
+        norm_mean = float(np.mean(sp_px) / med_torso) if (sp_px.size and med_torso > 1e-3) else None
+        norm_peak = float(np.max(sp_px) / med_torso) if (sp_px.size and med_torso > 1e-3) else None
         limb_stats[k] = {
             "freq_hz": round(f, 2) if f else None,
             "moves_per_min": round(f * 60, 0) if f else None,
-            "mean_speed_px_s": round(float(np.mean(sp)), 0) if sp.size else None,
-            "peak_speed_px_s": round(float(np.max(sp)), 0) if sp.size else None,
+            "intensity_bodylen_s": round(norm_mean, 2) if norm_mean else None,
+            "peak_bodylen_s": round(norm_peak, 2) if norm_peak else None,
             "detected_pct": round(float(seen), 1),
         }
     # body angle summary
@@ -258,8 +272,8 @@ def analyze(video, out_dir, skip=3, imgsz=960, conf=0.25, model="yolo11n-pose.pt
         flags.append("body often vertical (poor float)")
     if dip_freq > 6:
         flags.append("frequent head dips")
-    intensities = [s["mean_speed_px_s"] for s in limb_stats.values() if s["mean_speed_px_s"]]
-    if intensities and np.mean(intensities) > 400:
+    intensities = [s["intensity_bodylen_s"] for s in limb_stats.values() if s["intensity_bodylen_s"]]
+    if intensities and np.mean(intensities) > 1.2:
         flags.append("high limb effort")
     indicator = "elevated indicators" if len(flags) >= 2 else "no strong indicators"
 
@@ -292,7 +306,7 @@ def analyze(video, out_dir, skip=3, imgsz=960, conf=0.25, model="yolo11n-pose.pt
     _print_report(report)
 
     # ---- pass 2: annotated video (segment, or whole with --adur 0) ----
-    _render(net, video, out_dir, stem, waterline, band, report, imgsz, conf, astart, adur, fps, W, H)
+    _render(net, video, out_dir, stem, waterline, band, report, imgsz, conf, astart, adur, fps, W, H, strict, conf_gate)
     return report
 
 
@@ -311,8 +325,8 @@ def _write_txt(r, path):
         L.append(f"    dip at {e['start_s']}s lasting {e['duration_s']}s")
     L.append("\nLIMBS (left/right separate):")
     for k, s in r["limbs"].items():
-        L.append(f"    {k:6s} freq {s['moves_per_min']}/min | intensity {s['mean_speed_px_s']} px/s "
-                 f"(peak {s['peak_speed_px_s']}) | detected {s['detected_pct']}%")
+        L.append(f"    {k:6s} freq {s['moves_per_min']}/min | intensity {s['intensity_bodylen_s']} body-len/s "
+                 f"(peak {s['peak_bodylen_s']}) | detected {s['detected_pct']}%")
     h = r["swim_safety_indicator_heuristic"]
     L.append(f"\nHEURISTIC INDICATOR: {h['result']}  {h['flags']}  ({h['note']})")
     open(path, "w").write("\n".join(L) + "\n")
@@ -325,7 +339,7 @@ def _print_report(r):
     print(f"Head dips: {d['count']} ({d['per_minute']}/min), longest {d['longest_duration_s']}s "
           f"[head seen {d['head_detected_pct']}%].")
     for k, s in r["limbs"].items():
-        print(f"  {k:6s} {s['moves_per_min']}/min, {s['mean_speed_px_s']} px/s, seen {s['detected_pct']}%")
+        print(f"  {k:6s} {s['moves_per_min']}/min, {s['intensity_bodylen_s']} body-len/s, seen {s['detected_pct']}%")
     print(f"Indicator (heuristic): {r['swim_safety_indicator_heuristic']['result']}")
     print("========================================")
 
@@ -346,14 +360,14 @@ def _summary_chart(series, waterline, dips, limb_stats, path):
         ax[1].axvspan(d["start_s"], d["end_s"], color="#FF9AA2", alpha=0.4)
     ax[1].set_ylabel("head height (px)"); ax[1].set_title("Head vs surface (shaded = dip below)"); ax[1].legend()
     # limb speed bars
-    names = list(limb_stats); vals = [limb_stats[k]["mean_speed_px_s"] or 0 for k in names]
+    names = list(limb_stats); vals = [limb_stats[k]["intensity_bodylen_s"] or 0 for k in names]
     ax[2].bar(names, vals, color=["#FF8A80", "#22A6AE", "#FFB020", "#B39DDB"])
-    ax[2].set_ylabel("mean speed (px/s)"); ax[2].set_title("Limb intensity (left/right separate)")
+    ax[2].set_ylabel("intensity (body-len/s)"); ax[2].set_title("Limb intensity, torso-normalized (left/right separate)")
     ax[2].set_xlabel("time (s)")
     plt.tight_layout(); plt.savefig(path, dpi=110)
 
 
-def _render(net, video, out_dir, stem, waterline, band, report, imgsz, conf, astart, adur, fps, W, H):
+def _render(net, video, out_dir, stem, waterline, band, report, imgsz, conf, astart, adur, fps, W, H, strict, conf_gate):
     cap = cv2.VideoCapture(video)
     if adur == 0:
         astart, n_frames = 0.0, int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -362,22 +376,22 @@ def _render(net, video, out_dir, stem, waterline, band, report, imgsz, conf, ast
         n_frames = int(adur * fps)
     out_path = os.path.join(out_dir, f"{stem}_annotated.mp4")
     writer = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (W, H))
-    smoother = pm.Smoother((W**2 + H**2) ** 0.5)
-    dips_done = 0
+    tracker = pm.SkeletonTracker()
     dip_bounds = [(d["start_s"], d["end_s"]) for d in report["head_dips"]["events"]]
-    cur_angle = 0
     print("Rendering annotated video...")
     for n in range(n_frames):
         ok, frame = cap.read()
         if not ok:
             break
         t = astart + n / fps
-        if n % pm.REORIENT_EVERY == 0:
-            kp, cur_angle = pm.best_orientation(net, frame, imgsz, conf)
-        else:
-            kp, _ = pm._kp_for_angle(net, frame, cur_angle, imgsz, conf)
+        kp = pm.pose_cropped(net, frame, imgsz, conf)
         if kp is not None:
-            kp = pm.clean(kp, frame); kp = smoother.apply(kp)
+            kp = pm.clean(kp, frame, drop_head=False)
+            kp = tracker.update(kp)
+            if strict:
+                kp, ok = pm.quality_filter(kp, conf_min=conf_gate)
+                if not ok:
+                    kp = None
 
         # water line
         cv2.line(frame, (0, waterline), (W, waterline), (0, 165, 255), 2)
@@ -423,6 +437,8 @@ if __name__ == "__main__":
     ap.add_argument("--waterline", type=int, default=None, help="override auto water line (y pixels)")
     ap.add_argument("--astart", type=float, default=0.0, help="annotate clip start (s)")
     ap.add_argument("--adur", type=float, default=20.0, help="annotate length (s); 0 = whole video")
+    ap.add_argument("--loose", action="store_true", help="disable quality filtering (draw all frames, even wrong ones)")
+    ap.add_argument("--conf-gate", type=float, default=0.6, help="min confidence to keep a joint when strict")
     args = ap.parse_args()
     analyze(args.video, args.out, args.skip, args.imgsz, args.conf, args.model,
-            args.waterline, args.astart, args.adur)
+            args.waterline, args.astart, args.adur, strict=not args.loose, conf_gate=args.conf_gate)

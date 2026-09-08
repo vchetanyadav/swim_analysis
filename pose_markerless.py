@@ -35,8 +35,8 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
-OUTPUT_DIR = "output"                        # annotated clip always goes here
-ANNOTATED_NAME = "annotated.mp4"             # constant name, overwritten each run
+OUTPUT_DIR = "output"                        # annotated clips go here
+ANNOTATED_NAME = "annotated.mp4"             # legacy default (per-video names used below)
 
 KEYPOINTS = ["nose", "l_eye", "r_eye", "l_ear", "r_ear",
              "l_shoulder", "r_shoulder", "l_elbow", "r_elbow",
@@ -132,15 +132,186 @@ def is_machine(img, x, y, win=6):
     return (red | yellow | tube_blue).mean() > 0.5
 
 
-def clean(kp, img):
-    """Drop head joints and any joint sitting on equipment (mask, connector, tube)."""
+def clean(kp, img, drop_head=True):
+    """Set equipment joints to zero. With drop_head=True also zero the head
+    landmarks (for drawing); pass drop_head=False when you need the head for
+    head-position / neck / dip measurement."""
     kp = kp.copy()
-    for i in HEAD:
-        kp[i, 2] = 0.0
+    if drop_head:
+        for i in HEAD:
+            kp[i, 2] = 0.0
     for i in BODY:
         if kp[i, 2] > 0.5 and is_machine(img, kp[i, 0], kp[i, 1]):
             kp[i, 2] = 0.0
     return kp
+
+
+# ---------------- cropped, contrast-boosted pose (big non-training accuracy win) ----------------
+def enhance(bgr):
+    """CLAHE on the L channel to recover limb edges in low-contrast blue water."""
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    l = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(l)
+    return cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
+
+
+def _largest_box(model, frame, imgsz, conf):
+    r = model.predict(frame, imgsz=imgsz, conf=conf, verbose=False)[0]
+    if r.boxes is None or len(r.boxes) == 0:
+        return None
+    areas = (r.boxes.xywh[:, 2] * r.boxes.xywh[:, 3]).cpu().numpy()
+    x, y, w, h = r.boxes.xywh[int(np.argmax(areas))].cpu().numpy()
+    return float(x), float(y), float(w), float(h)
+
+
+def pose_cropped(model, frame, imgsz=640, conf=0.25, margin=0.28,
+                 use_clahe=True, rotate=True):
+    """Detect the swimmer, crop tightly (so limbs get many more pixels), boost
+    contrast, run pose on the crop, and map the joints back to full-frame
+    coordinates. This gives far better distal-joint accuracy than running the
+    model on the whole 1920x1080 image, with no training required."""
+    H, W = frame.shape[:2]
+    box = _largest_box(model, frame, imgsz, conf)
+    if box is None:
+        return None
+    x, y, w, h = box
+    x0 = max(0, int(x - w / 2 - margin * w)); x1 = min(W, int(x + w / 2 + margin * w))
+    y0 = max(0, int(y - h / 2 - margin * h)); y1 = min(H, int(y + h / 2 + margin * h))
+    crop = frame[y0:y1, x0:x1]
+    if crop.size == 0:
+        return None
+    if use_clahe:
+        crop = enhance(crop)
+    if rotate:
+        kp, _ = best_orientation(model, crop, imgsz, conf)
+    else:
+        r = model.predict(crop, imgsz=imgsz, conf=conf, verbose=False)[0]
+        if r.boxes is None or len(r.boxes) == 0:
+            return None
+        a = (r.boxes.xywh[:, 2] * r.boxes.xywh[:, 3]).cpu().numpy()
+        kp = r.keypoints.data[int(np.argmax(a))].cpu().numpy()
+    if kp is None:
+        return None
+    kp = kp.copy()
+    kp[:, 0] += x0
+    kp[:, 1] += y0
+    return kp
+
+
+def _mid(kp, a, b):
+    pa = kp[a, :2] if kp[a, 2] > 0.5 else None
+    pb = kp[b, :2] if kp[b, 2] > 0.5 else None
+    if pa is not None and pb is not None:
+        return (pa + pb) / 2
+    return pa if pa is not None else pb
+
+
+class SkeletonTracker:
+    """Temporal correctness layer: fixes left/right swaps, rejects bones that
+    suddenly stretch, and holds joints that teleport further than the body could
+    move. All thresholds are relative to torso length, not image size, so they
+    scale with how close the swimmer is."""
+
+    def __init__(self):
+        self.prev = None
+        self.bone_med = {}
+
+    def update(self, kp):
+        if kp is None:
+            self.prev = None
+            return None
+        kp = kp.copy()
+        sh, hp = _mid(kp, 5, 6), _mid(kp, 11, 12)
+        torso = float(np.linalg.norm(sh - hp)) if (sh is not None and hp is not None) else None
+
+        # 1) left/right swap correction against the previous frame
+        if self.prev is not None:
+            for l, r in [(9, 10), (15, 16), (7, 8), (13, 14), (5, 6), (11, 12)]:
+                if all(kp[i, 2] > 0.5 for i in (l, r)) and all(self.prev[i, 2] > 0.5 for i in (l, r)):
+                    keep = (np.linalg.norm(kp[l, :2] - self.prev[l, :2]) +
+                            np.linalg.norm(kp[r, :2] - self.prev[r, :2]))
+                    swap = (np.linalg.norm(kp[r, :2] - self.prev[l, :2]) +
+                            np.linalg.norm(kp[l, :2] - self.prev[r, :2]))
+                    if swap < keep:
+                        kp[[l, r]] = kp[[r, l]]
+
+        # 2) bone-length consistency (reject sudden elongation)
+        if torso:
+            for a, b in BONES:
+                if kp[a, 2] > 0.5 and kp[b, 2] > 0.5:
+                    ln = float(np.linalg.norm(kp[a, :2] - kp[b, :2]))
+                    med = self.bone_med.get((a, b))
+                    if med is not None and ln > 2.2 * med:
+                        kp[b, 2] = 0.0
+                    else:
+                        self.bone_med[(a, b)] = ln if med is None else 0.9 * med + 0.1 * ln
+
+        # 3) torso-scaled teleport rejection
+        if self.prev is not None and torso:
+            for i in BODY:
+                if kp[i, 2] > 0.5 and self.prev[i, 2] > 0.5:
+                    if np.linalg.norm(kp[i, :2] - self.prev[i, :2]) > 0.8 * torso:
+                        kp[i, :2] = self.prev[i, :2]
+
+        self.prev = kp.copy()
+        return kp
+
+
+# Bone pairs used for the plausibility check (index_a, index_b).
+BONES = [(5, 7), (7, 9), (6, 8), (8, 10), (11, 13), (13, 15), (12, 14), (14, 16)]
+
+
+def quality_filter(kp, conf_min=0.6):
+    """Make the skeleton honest: keep only joints the model is sure about, and
+    drop the whole frame's limbs if the geometry is anatomically impossible.
+
+    Two checks, aimed at the exact failures seen on curled underwater poses:
+      1. Confidence gate: any joint below conf_min is dropped (removes the
+         low-confidence guesses that produce stray stubs and crossing lines).
+      2. Plausibility: bones should be similar in length to the torso. If any
+         limb bone is far longer than the shoulder-hip span, or the two ankles
+         (or two wrists) collapse onto the same point, the limbs are mis-assigned
+         and are dropped, so bad frames are skipped rather than measured.
+
+    Returns (kp, ok) where ok is False when the frame is too unreliable to use.
+    """
+    kp = kp.copy()
+    for i in BODY:
+        if kp[i, 2] < conf_min:
+            kp[i, 2] = 0.0
+
+    def pt(i):
+        return kp[i, :2] if kp[i, 2] >= conf_min else None
+
+    # torso scale = shoulder-midpoint to hip-midpoint distance
+    sh = [pt(5), pt(6)]
+    hp = [pt(11), pt(12)]
+    sh = [p for p in sh if p is not None]
+    hp = [p for p in hp if p is not None]
+    if not sh or not hp:
+        return kp, False                       # no torso reference, can't trust the frame
+    torso = float(np.linalg.norm(np.mean(sh, axis=0) - np.mean(hp, axis=0)))
+    if torso < 1e-3:
+        return kp, False
+
+    # 1) drop any implausibly long bone (limb crossing the body)
+    for a, b in BONES:
+        pa, pb = pt(a), pt(b)
+        if pa is not None and pb is not None:
+            if np.linalg.norm(pa - pb) > 1.8 * torso:
+                kp[a, 2] = 0.0
+                kp[b, 2] = 0.0
+
+    # 2) left/right joints collapsing onto the same point = mis-assignment
+    for l, r in [(9, 10), (15, 16), (13, 14), (7, 8)]:
+        pl, pr = pt(l), pt(r)
+        if pl is not None and pr is not None and np.linalg.norm(pl - pr) < 0.08 * torso:
+            kp[l, 2] = 0.0
+            kp[r, 2] = 0.0
+
+    # frame is usable if enough body joints survived
+    survivors = int(np.sum([kp[i, 2] >= conf_min for i in BODY]))
+    return kp, survivors >= 6
 
 
 class Smoother:
@@ -230,7 +401,8 @@ def extract(video, out_csv, model_name="yolo11n-pose.pt", skip=3, imgsz=960, con
 
     if annotate:
         os.makedirs(OUTPUT_DIR, exist_ok=True)
-        out_path = os.path.join(OUTPUT_DIR, ANNOTATED_NAME)
+        stem = os.path.splitext(os.path.basename(video))[0]
+        out_path = os.path.join(OUTPUT_DIR, f"annotated_{stem}.mp4")
         _annotate_clip(model, video, out_path, astart, adur, imgsz, conf)
 
 

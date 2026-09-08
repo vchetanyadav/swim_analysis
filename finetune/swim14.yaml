@@ -1,0 +1,24 @@
+# 14-keypoint swimmer skeleton (scientifically-focused; head_center replaces the
+# mask-unreliable nose, neck added). Use with a fine-tune trained on THIS layout.
+#
+# Order:
+#  0 head_center  1 neck
+#  2 l_shoulder   3 r_shoulder
+#  4 l_elbow      5 r_elbow
+#  6 l_wrist      7 r_wrist
+#  8 l_hip        9 r_hip
+# 10 l_knee      11 r_knee
+# 12 l_ankle     13 r_ankle
+#
+# Split by PARTICIPANT (see split_dataset.py), never random frames.
+
+path: ./swim_dataset14
+train: images/train
+val: images/val
+
+kpt_shape: [14, 3]
+# left/right mirror map for flip augmentation (head_center and neck map to self)
+flip_idx: [0, 1, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12]
+
+names:
+  0: swimmer
