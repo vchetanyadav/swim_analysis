@@ -42,6 +42,7 @@ def evaluate(video, model_name, skip=5, imgsz=1280, conf=0.25, astart=0.0, adur=
         if r.boxes is not None and len(r.boxes) > 0:
             a = (r.boxes.xywh[:, 2] * r.boxes.xywh[:, 3]).cpu().numpy()
             kp = r.keypoints.data[int(np.argmax(a))].cpu().numpy()
+            BODY = range(2, 14) if kp.shape[0] == 14 else range(5, 17)
             if np.mean([kp[i, 2] > 0.5 for i in BODY]) >= 0.75:
                 usable += 1
         idx += 1
