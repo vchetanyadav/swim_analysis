@@ -1,0 +1,10 @@
+pandas
+numpy
+scikit-learn
+scipy
+matplotlib
+joblib
+openpyxl
+opencv-python-headless
+imageio
+imageio-ffmpeg

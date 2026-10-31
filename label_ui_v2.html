@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Float Labeling</title>
+<style>
+:root{--bg:#0f172a;--card:#1e293b;--fg:#e2e8f0;--mut:#94a3b8;--acc:#38bdf8;--good:#34d399;--warn:#fbbf24;}
+*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,Segoe UI,Roboto,sans-serif}
+.wrap{max-width:900px;margin:0 auto;padding:16px} h1{font-size:18px;margin:4px 0 2px}
+.sub{color:var(--mut);font-size:13px;margin-bottom:10px}
+video{width:100%;border-radius:10px;background:#000;max-height:46vh}
+.bar{display:flex;justify-content:space-between;align-items:center;gap:8px;margin:8px 0}
+.prog{color:var(--mut);font-size:13px} .meta{color:var(--mut);font-size:12px;word-break:break-all}
+.q{background:var(--card);border-radius:10px;padding:8px 10px;margin-top:8px}
+.q .lab{font-weight:600;margin-bottom:5px;font-size:14px} .q .hint{color:var(--mut);font-weight:400;font-size:12px}
+.opts{display:flex;gap:6px;flex-wrap:wrap}
+button.opt{flex:1;min-width:92px;padding:8px 6px;border:1px solid #334155;background:#0b1220;color:var(--fg);border-radius:8px;cursor:pointer;font-size:13px}
+button.opt:hover{border-color:var(--acc)} button.opt.sel{background:var(--acc);color:#00131f;border-color:var(--acc);font-weight:600}
+.exc button.opt.sel{background:var(--warn);color:#241a00}
+.nav{display:flex;gap:8px;margin-top:12px} .nav button{flex:1;padding:11px;border-radius:8px;border:1px solid #334155;background:var(--card);color:var(--fg);cursor:pointer;font-size:15px}
+.nav button.primary{background:var(--good);color:#00230f;border-color:var(--good);font-weight:600}
+.tools{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap} .tools button{padding:9px 12px;border-radius:8px;border:1px solid #334155;background:#0b1220;color:var(--fg);cursor:pointer;font-size:13px}
+.kbd{color:var(--mut);font-size:12px;margin-top:8px} .warnbox{background:#3b1d1d;color:#fecaca;padding:10px;border-radius:8px;margin:10px 0;display:none}
+</style></head><body><div class="wrap">
+<h1>Survival-swim passive-float labeling</h1>
+<div class="sub">Watch the skeleton clip and rate each item. Progress saves in this browser. Export when done or partway.</div>
+<div id="noman" class="warnbox">Could not find <b>manifest.js</b>. Keep this file next to manifest.js and the clips/ folder.</div>
+<div class="bar"><div class="prog" id="prog">–</div><div class="meta" id="meta"></div></div>
+<video id="vid" autoplay loop muted playsinline controls></video>
+
+<div class="q" id="q_float"><div class="lab">Float state — is passive flotation maintained? <span class="hint">1 2 3</span></div><div class="opts">
+<button class="opt" data-v="0">0 · not floating</button><button class="opt" data-v="1">1 · almost</button><button class="opt" data-v="2">2 · floating</button></div></div>
+
+<div class="q" id="q_pa"><div class="lab">Passive or active? <span class="hint">Q W E</span></div><div class="opts">
+<button class="opt" data-v="0">0 · passive</button><button class="opt" data-v="1">1 · mixed</button><button class="opt" data-v="2">2 · actively held</button></div></div>
+
+<div class="q" id="q_post"><div class="lab">Posture <span class="hint">A S D</span></div><div class="opts">
+<button class="opt" data-v="0">0 · horizontal</button><button class="opt" data-v="1">1 · inclined</button><button class="opt" data-v="2">2 · vertical</button></div></div>
+
+<div class="q" id="q_stab"><div class="lab">Stability <span class="hint">Z X C</span></div><div class="opts">
+<button class="opt" data-v="0">0 · stable</button><button class="opt" data-v="1">1 · moderate</button><button class="opt" data-v="2">2 · unstable</button></div></div>
+
+<div class="q" id="q_conf"><div class="lab">Your label confidence <span class="hint">7 8 9</span></div><div class="opts">
+<button class="opt" data-v="0">0 · low</button><button class="opt" data-v="1">1 · medium</button><button class="opt" data-v="2">2 · high</button></div></div>
+
+<div class="q exc" id="q_exc"><div class="lab">Exclude this clip? <span class="hint">X · pose too poor / not a float attempt</span></div><div class="opts">
+<button class="opt" data-v="1">exclude</button><button class="opt" data-v="0">keep</button></div></div>
+
+<div class="nav"><button id="prev">← Prev</button><button id="next" class="primary">Next →</button></div>
+<div class="tools"><button id="export">⬇ Export labels.csv</button><button id="jump">Jump to first unlabeled</button><span class="prog" id="count"></span></div>
+<div class="kbd">1 2 3 Float · Q W E Passive/Active · A S D Posture · Z X C Stability · 7 8 9 Confidence · X exclude · ← →</div>
+</div>
+<script src="manifest.js"></script>
+<script>
+const M=window.MANIFEST||[]; if(!M.length)document.getElementById('noman').style.display='block';
+const KEY='floatlabels_v2'; let labels={}; try{labels=JSON.parse(localStorage.getItem(KEY)||'{}')}catch(e){}
+let i=0; const vid=document.getElementById('vid');
+const F=[['float','q_float'],['pa','q_pa'],['post','q_post'],['stab','q_stab'],['conf','q_conf'],['exc','q_exc']];
+const key=it=>it.source+'|'+it.seg_id+'|'+it.start_s;
+function save(){try{localStorage.setItem(KEY,JSON.stringify(labels))}catch(e){}render()}
+const cur=()=>M[i]; const rec=()=>{const k=key(cur());return labels[k]||(labels[k]={})};
+function setV(f,v){rec()[f]=v;save()}
+document.querySelectorAll('.q').forEach(q=>{const f=F.find(x=>x[1]===q.id)[0];
+  q.querySelectorAll('button.opt').forEach(b=>b.onclick=()=>setV(f,parseInt(b.dataset.v)))});
+function render(){ if(!M.length)return; const it=cur(); vid.src=it.clip; vid.play().catch(()=>{});
+  document.getElementById('prog').textContent=`Clip ${i+1} / ${M.length}`;
+  document.getElementById('meta').textContent=`${it.participant}  ·  ${it.start_s}-${it.end_s}s`;
+  const r=labels[key(it)]||{};
+  F.forEach(([f,qid])=>document.querySelectorAll('#'+qid+' button.opt').forEach(b=>
+    b.classList.toggle('sel', r[f]!==undefined && parseInt(b.dataset.v)===r[f])));
+  const done=Object.values(labels).filter(x=>x.float!==undefined||x.exc===1).length;
+  document.getElementById('count').textContent=`${done} / ${M.length} labeled`; }
+function go(d){i=Math.max(0,Math.min(M.length-1,i+d));render()}
+document.getElementById('next').onclick=()=>go(1); document.getElementById('prev').onclick=()=>go(-1);
+document.getElementById('jump').onclick=()=>{for(let j=0;j<M.length;j++){const r=labels[key(M[j])]||{};if(r.float===undefined&&r.exc!==1){i=j;break}}render()};
+const map={'1':['float',0],'2':['float',1],'3':['float',2],'q':['pa',0],'w':['pa',1],'e':['pa',2],
+  'a':['post',0],'s':['post',1],'d':['post',2],'z':['stab',0],'x':['stab',1],'c':['stab',2],
+  '7':['conf',0],'8':['conf',1],'9':['conf',2]};
+document.addEventListener('keydown',ev=>{ if(ev.key==='ArrowRight')return go(1); if(ev.key==='ArrowLeft')return go(-1);
+  if(ev.key.toLowerCase()==='x'){setV('exc',1);return;} const m=map[ev.key.toLowerCase()]; if(m)setV(m[0],m[1]); });
+document.getElementById('export').onclick=()=>{
+  const cols=['source','participant','seg_id','start_s','end_s','float_label','passive_active','posture','stability','label_confidence','exclude'];
+  let out=cols.join(',')+'\n';
+  M.forEach(it=>{const r=labels[key(it)]||{}; if(r.float===undefined&&r.exc===undefined)return;
+    out+=[ '"'+it.source+'"',it.participant,it.seg_id,it.start_s,it.end_s,
+           r.float??'',r.pa??'',r.post??'',r.stab??'',r.conf??'',r.exc??0].join(',')+'\n';});
+  const b=new Blob([out],{type:'text/csv'});const a=document.createElement('a');
+  a.href=URL.createObjectURL(b);a.download='labels.csv';a.click();};
+render();
+</script></body></html>
