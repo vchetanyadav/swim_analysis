@@ -1,0 +1,38 @@
+{
+  "trunk": {
+    "Softmax": {
+      "macro_f1": 0.606,
+      "balanced_acc": 0.657,
+      "quadratic_kappa": 0.569
+    },
+    "Tree": {
+      "macro_f1": 0.593,
+      "balanced_acc": 0.654,
+      "quadratic_kappa": 0.564
+    }
+  },
+  "activity": {
+    "Softmax": {
+      "macro_f1": 0.48,
+      "balanced_acc": 0.513,
+      "quadratic_kappa": 0.296
+    },
+    "Tree": {
+      "macro_f1": 0.454,
+      "balanced_acc": 0.464,
+      "quadratic_kappa": 0.206
+    }
+  },
+  "outcome": {
+    "Softmax": {
+      "macro_f1": 0.456,
+      "balanced_acc": 0.514,
+      "quadratic_kappa": 0.506
+    },
+    "Tree": {
+      "macro_f1": 0.481,
+      "balanced_acc": 0.494,
+      "quadratic_kappa": 0.483
+    }
+  }
+}

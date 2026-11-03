@@ -1,0 +1,56 @@
+nohup: ignoring input
+AI Flotation Analyser web app on http://127.0.0.1:5000  (Ctrl-C to stop)
+ * Serving Flask app 'swim_webapp'
+ * Debug mode: off
+[31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://127.0.0.1:5000
+[33mPress CTRL+C to quit[0m
+127.0.0.1 - - [03/Nov/2026 19:29:55] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [03/Nov/2026 19:30:00] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [03/Nov/2026 19:30:01] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [03/Nov/2026 19:30:02] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [03/Nov/2026 19:30:02] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [03/Nov/2026 19:30:03] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [03/Nov/2026 19:30:03] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [03/Nov/2026 19:30:03] "GET / HTTP/1.1" 200 -
+[h264 @ 0x7fb810b6bec0] error while decoding MB 112 67, bytestream -8
+INFO: Created TensorFlow Lite XNNPACK delegate for CPU.
+[h264 @ 0x7fb810bbd580] error while decoding MB 112 67, bytestream -8
+[h264 @ 0x7fb8114395c0] error while decoding MB 109 67, bytestream -10
+[h264 @ 0x7fb8113b79c0] error while decoding MB 116 67, bytestream -6
+[h264 @ 0x7fb810ba6240] error while decoding MB 112 67, bytestream -5
+[h264 @ 0x7fb810bbd580] error while decoding MB 113 67, bytestream -7
+[h264 @ 0x7fb8114395c0] error while decoding MB 112 67, bytestream -6
+[h264 @ 0x7fb8113b79c0] error while decoding MB 113 67, bytestream -10
+[h264 @ 0x7fb810ba6240] error while decoding MB 112 67, bytestream -5
+[h264 @ 0x7fb810bbd580] error while decoding MB 112 67, bytestream -7
+[h264 @ 0x7fb8114395c0] error while decoding MB 112 67, bytestream -7
+[h264 @ 0x7fb8113b79c0] error while decoding MB 110 67, bytestream -6
+[h264 @ 0x7fb810ba6240] error while decoding MB 111 67, bytestream -13
+[h264 @ 0x7fb810bbd580] error while decoding MB 109 67, bytestream -5
+[h264 @ 0x7fb8114395c0] error while decoding MB 112 67, bytestream -6
+[h264 @ 0x7fb8113b79c0] error while decoding MB 114 67, bytestream -8
+[h264 @ 0x7fb810ba6240] error while decoding MB 111 67, bytestream -7
+/data/home/s4137946/swim_analysis/floatml/mp_features.py:127: RuntimeWarning: Mean of empty slice
+  "arm_speed":np.nanmean([asl,asr]),"leg_speed":np.nanmean([lsl,lsr]),
+upload                                   side_front  124 windows -> /tmp/swimweb_6kzdapvk/feat/clip_features.csv  (fps 25)
+
+done: 1/1 files -> /tmp/swimweb_6kzdapvk/feat/ and /tmp/swimweb_6kzdapvk/top/
+
+PASSIVE FLOAT ASSESSMENT  —  clip_features   [trained model (RandomForest)]
+  Classification : FLOATING
+  Confidence     : 62%
+  Mix            : floating 65% / almost 16% / not 20%
+  Posture        : inclined (trunk 41.6°)
+  Stability      : high (variation ±3.4°)
+  Vertical move  : stable (drift -0.002 /s)
+  Arm activity   : moderate
+  Leg activity   : moderate
+  Symmetry       : balanced
+  Pose quality   : 92.4% valid
+wrote clip_features_report.json, clip_features_windows.csv, clip_features_timeline.png to /tmp/swimweb_6kzdapvk/out/
+swim_webapp.py:87: RuntimeWarning: Mean of empty slice
+  return df[have].apply(lambda r: np.nanmean(r.values.astype(float)), axis=1)
+swim_webapp.py:87: RuntimeWarning: Mean of empty slice
+  return df[have].apply(lambda r: np.nanmean(r.values.astype(float)), axis=1)
+127.0.0.1 - - [03/Nov/2026 19:35:02] "POST /analyze HTTP/1.1" 200 -

@@ -1,0 +1,5 @@
+AI Flotation Analyser web app on http://127.0.0.1:5000  (Ctrl-C to stop)
+ * Serving Flask app 'swim_webapp'
+ * Debug mode: off
+Address already in use
+Port 5000 is in use by another program. Either identify and stop that program, or start the server with a different port.
